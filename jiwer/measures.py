@@ -144,7 +144,7 @@ def compute_measures(
     truth_transform: Union[tr.Compose, tr.AbstractTransform] = wer_default,
     hypothesis_transform: Union[tr.Compose, tr.AbstractTransform] = wer_default,
     **kwargs
-) -> Dict[str, float]:
+) -> Dict[str, Union[float, List[str], List[List[str]]]]:
     """
     Calculate error measures between a set of ground-truth sentences and a set of
     hypothesis sentences.
@@ -173,7 +173,8 @@ def compute_measures(
     :param hypothesis: the hypothesis sentence(s) as a string or list of strings
     :param truth_transform: the transformation to apply on the truths input
     :param hypothesis_transform: the transformation to apply on the hypothesis input
-    :return: a dict with WER, MER, WIP and WIL measures as floating point numbers
+    :return: a dict with WER, MER, WIP and WIL measures as floating point numbers, plus
+             the actual worlds that have been substituted, inserted, or removed
     """
     # deprecated old API
     if "standardize" in kwargs:
@@ -206,7 +207,7 @@ def compute_measures(
         raise ValueError("one or more groundtruths are empty strings")
 
     # Preprocess truth and hypothesis
-    truth, hypothesis = _preprocess(
+    truth, hypothesis, truth_text, hypothesis_text = _preprocess(
         truth, hypothesis, truth_transform, hypothesis_transform
     )
 
@@ -217,11 +218,24 @@ def compute_measures(
     # also keep track of the total number of ground truth words and hypothesis words
     gt_tokens, hp_tokens = 0, 0
 
-    for groundtruth_sentence, hypothesis_sentence in zip(truth, hypothesis):
-        # Get the operation counts (#hits, #substitutions, #deletions, #insertions)
-        hits, substitutions, deletions, insertions = _get_operation_counts(
+    # also determine what actual words have been substituted, deleted, or inserted
+    S_W, D_W, I_W = [], [], []
+
+    for groundtruth_sentence, hypothesis_sentence, truth_words, hypothesis_words in zip(
+            truth, hypothesis, truth_text, hypothesis_text
+    ):
+        # Get the operation counts (#hits, #substitutions, #deletions, #insertions, list of operations)
+        hits, substitutions, deletions, insertions, operations = _get_operation_counts(
             groundtruth_sentence, hypothesis_sentence
         )
+
+        for operation in operations:
+            if operation[0] == 'insert':
+                I_W.append(hypothesis_words[operation[2]])
+            elif operation[0] == 'delete':
+                D_W.append(truth_words[operation[1]])
+            elif operation[0] == 'replace':
+                S_W.append([truth_words[operation[1]], hypothesis_words[operation[2]]])
 
         H += hits
         S += substitutions
@@ -229,6 +243,7 @@ def compute_measures(
         I += insertions
         gt_tokens += len(groundtruth_sentence)
         hp_tokens += len(hypothesis_sentence)
+
 
     # Compute Word Error Rate
     wer = float(S + D + I) / float(H + S + D)
@@ -251,6 +266,9 @@ def compute_measures(
         "substitutions": S,
         "deletions": D,
         "insertions": I,
+        "substituted_words": S_W,
+        "deleted_words": D_W,
+        "inserted_words": I_W,
     }
 
 
@@ -306,7 +324,7 @@ def _preprocess(
     hypothesis: List[str],
     truth_transform: Union[tr.Compose, tr.AbstractTransform],
     hypothesis_transform: Union[tr.Compose, tr.AbstractTransform],
-) -> Tuple[List[str], List[str]]:
+) -> Tuple[List[str], List[str], List[str], List[str]]:
     """
     Pre-process the truth and hypothesis into a form such that the Levenshtein
     library can compute the edit operations.can handle.
@@ -315,7 +333,8 @@ def _preprocess(
     :param hypothesis: the hypothesis sentence(s) as a string or list of strings
     :param truth_transform: the transformation to apply on the truths input
     :param hypothesis_transform: the transformation to apply on the hypothesis input
-    :return: the preprocessed truth and hypothesis
+    :return: the preprocessed truth and hypothesis, and the original truth and hypothesis
+             after applying the transformation
     """
     # Apply transforms. The transforms should collapses input to a list of list of words
     transformed_truth = truth_transform(truth)
@@ -359,7 +378,7 @@ def _preprocess(
         for sentence in transformed_hypothesis
     ]
 
-    return truth_chars, hypothesis_chars
+    return truth_chars, hypothesis_chars, transformed_truth, transformed_hypothesis
 
 
 def _is_list_of_list_of_strings(x: Any, require_non_empty_lists: bool):
@@ -381,7 +400,7 @@ def _is_list_of_list_of_strings(x: Any, require_non_empty_lists: bool):
 
 def _get_operation_counts(
     source_string: str, destination_string: str
-) -> Tuple[int, int, int, int]:
+) -> Tuple[int, int, int, int, tuple]:
     """
     Check how many edit operations (delete, insert, replace) are required to
     transform the source string into the destination string. The number of hits
@@ -390,7 +409,7 @@ def _get_operation_counts(
 
     :param source_string: the source string to transform into the destination string
     :param destination_string: the destination to transform the source string into
-    :return: a tuple of #hits, #substitutions, #deletions, #insertions
+    :return: a tuple of #hits, #substitutions, #deletions, #insertions, tuple of operations
     """
     editops = Levenshtein.editops(source_string, destination_string)
 
@@ -399,4 +418,4 @@ def _get_operation_counts(
     insertions = sum(1 if op[0] == "insert" else 0 for op in editops)
     hits = len(source_string) - (substitutions + deletions)
 
-    return hits, substitutions, deletions, insertions
+    return hits, substitutions, deletions, insertions, tuple(editops)
